@@ -122,12 +122,18 @@ const library = Deno.dlopen(
 
 async function errno() {
   const ret = await library.symbols.__errno_location();
+  if (ret === null) {
+    return 0;
+  }
   const ptrView = new Deno.UnsafePointerView(ret);
   return ptrView.getInt32();
 }
 
 async function strerror(errnum: number) {
   const ret = await library.symbols.strerror(errnum);
+  if (ret === null) {
+    return "";
+  }
   const ptrView = new Deno.UnsafePointerView(ret);
   return ptrView.getCString();
 }
@@ -136,8 +142,12 @@ async function geterrnoString() {
   return strerror(await errno());
 }
 
-export class SerialPort {
+export class SerialPort implements AsyncDisposable {
   constructor(private fd: number, private options: SerialOptions) {}
+
+  async [Symbol.asyncDispose]() {
+    await this.close();
+  }
 
   async read() {
     const ibuffer = new Uint8Array(this.options.buffer_size ?? 255);
@@ -186,9 +196,9 @@ export class SerialPort {
     }
   }
 
-  write_string(str: string) {
+  async write_string(str: string) {
     const data = new TextEncoder().encode(str);
-    return this.write(data);
+    return await this.write(data);
   }
 
   async close() {
@@ -253,7 +263,7 @@ export async function open(file: string, options: SerialOptions) {
   return new SerialPort(fd, options);
 }
 
-async function sleep(milliseconds: number) {
+function sleep(milliseconds: number) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
