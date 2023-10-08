@@ -41,32 +41,79 @@ const CRTSCTS = 0o20000000000;
 const VTIME = 5;
 const VMIN = 6;
 
-export const enum Baudrate {
-  B9600 = 0o000015,
-  B19200 = 0o000016,
-  B38400 = 0o000017,
-  B57600 = 0o010001,
-  B115200 = 0o010002,
-  B230400 = 0o010003,
-  B460800 = 0o010004,
-  B500000 = 0o010005,
-  B576000 = 0o010006,
-  B921600 = 0o010007,
-  B1000000 = 0o010010,
-  B1152000 = 0o010011,
-  B1500000 = 0o010012,
-  B2000000 = 0o010013,
-  B2500000 = 0o010014,
-  B3000000 = 0o010015,
-  B3500000 = 0o010016,
-  B4000000 = 0o010017,
+function numberBaudrateToBaudrateValue(num: number) {
+  switch (num) {
+    case 9600:
+      return 0o000015;
+    case 19200:
+      return 0o000016;
+    case 38400:
+      return 0o000017;
+    case 57600:
+      return 0o010001;
+    case 115200:
+      return 0o010002;
+    case 230400:
+      return 0o010003;
+    case 460800:
+      return 0o010004;
+    case 500000:
+      return 0o010005;
+    case 576000:
+      return 0o010006;
+    case 921600:
+      return 0o010007;
+    case 1000000:
+      return 0o010010;
+    case 1152000:
+      return 0o010011;
+    case 1500000:
+      return 0o010012;
+    case 2000000:
+      return 0o010013;
+    case 2500000:
+      return 0o010014;
+    case 3000000:
+      return 0o010015;
+    case 3500000:
+      return 0o010016;
+    case 4000000:
+      return 0o010017;
+  }
+  throw new Error("unsupported baudrate");
 }
 
+type ParityType = "none" | "even" | "odd";
+type FlowControlType = "none" | "hardware";
+
 export interface SerialOptions {
-  baudrate: Baudrate;
-  timeout_in_deciseconds: number;
-  minimum_number_of_chars_read: number;
-  buffer_size?: number;
+  baudRate:
+    | 9600
+    | 19200
+    | 38400
+    | 57600
+    | 115200
+    | 230400
+    | 460800
+    | 500000
+    | 576000
+    | 921600
+    | 1000000
+    | 1152000
+    | 1500000
+    | 2000000
+    | 2500000
+    | 3000000
+    | 3500000
+    | 4000000;
+  dataBits?: 7 | 8; // default 8
+  stopBits?: 1 | 2; // default 1
+  parity?: ParityType; // default none
+  bufferSize?: number; // default 255
+  flowControl?: FlowControlType; // default none
+
+  timeoutInDeciseconds?: number;
+  minimumNumberOfCharsRead?: number;
 }
 
 const library = Deno.dlopen(
@@ -75,50 +122,65 @@ const library = Deno.dlopen(
     open: {
       parameters: ["pointer", "i32"],
       result: "i32",
-      nonblocking: true,
+      nonblocking: false,
     },
     close: {
       parameters: ["i32"],
       result: "i32",
-      nonblocking: true,
+      nonblocking: false,
     },
     write: {
       parameters: ["i32", "pointer", "usize"],
       result: "isize",
-      nonblocking: true,
+      nonblocking: false,
     },
     read: {
       parameters: ["i32", "pointer", "usize"],
       result: "isize",
       nonblocking: true,
     },
-    __errno_location: {
+    non_blocking__errno_location: {
       parameters: [],
       result: "pointer",
       nonblocking: true,
+      name: "__errno_location",
+    },
+    __errno_location: {
+      parameters: [],
+      result: "pointer",
+      nonblocking: false,
     },
     strerror: {
       parameters: ["i32"],
       result: "pointer",
-      nonblocking: true,
+      nonblocking: false,
     },
     tcgetattr: {
       parameters: ["i32", "pointer"],
       result: "i32",
-      nonblocking: true,
+      nonblocking: false,
     },
     tcsetattr: {
       parameters: ["i32", "i32", "pointer"],
       result: "i32",
-      nonblocking: true,
+      nonblocking: false,
     },
     cfsetspeed: {
       parameters: ["pointer", "u32"],
       result: "i32",
-      nonblocking: true,
+      nonblocking: false,
     },
   } as const,
 );
+
+async function nonBlockingErrno() {
+  const ret = await library.symbols.non_blocking__errno_location();
+  if (ret === null) {
+    return 0;
+  }
+  const ptrView = new Deno.UnsafePointerView(ret);
+  return ptrView.getInt32();
+}
 
 async function errno() {
   const ret = await library.symbols.__errno_location();
@@ -142,70 +204,67 @@ async function geterrnoString() {
   return strerror(await errno());
 }
 
-export class SerialPort implements AsyncDisposable {
-  constructor(private fd: number, private options: SerialOptions) {}
+async function getNonBlockingErrnoString() {
+  return strerror(await nonBlockingErrno());
+}
 
-  async [Symbol.asyncDispose]() {
-    await this.close();
-  }
+export class SerialSource {
+  constructor(private serialPort: SerialPort) {}
 
-  async read() {
-    const ibuffer = new Uint8Array(this.options.buffer_size ?? 255);
-    const rlen = await library.symbols.read(
-      this.fd,
-      Deno.UnsafePointer.of(ibuffer),
-      ibuffer.length,
+  async pull(controller: ReadableStreamDefaultController) {
+    if (this.serialPort.fd === undefined) {
+      controller.close();
+      return;
+    }
+
+    const buffer = new Uint8Array(this.serialPort.options!.bufferSize ?? 255);
+    const len = await library.symbols.read(
+      this.serialPort.fd,
+      Deno.UnsafePointer.of(buffer),
+      buffer.length,
     );
-    if (rlen < 0) {
-      throw new Error(`Error while reading: ${await geterrnoString()}`);
+    if (len < 0) {
+      controller.error(
+        `Error while reading: ${await getNonBlockingErrnoString()}`,
+      );
     }
-    return ibuffer.subarray(0, rlen as number);
+    controller.enqueue(buffer.subarray(0, len as number));
   }
 
-  async read_string() {
-    return new TextDecoder().decode(await this.read());
+  cancel() {
+    this.serialPort.close();
   }
+}
 
-  async *read_line() {
-    let data = "";
-    while (true) {
-      const read = await this.read_string();
-      if (read.length == 0) {
-        continue;
-      }
-      data += read;
-      const lines = data.split("\n");
-      data = lines.pop() as string;
-      for (const l of lines) {
-        yield l;
-      }
+export class SerialSink {
+  constructor(private serialPort: SerialPort) {}
+
+  async write(data: Uint8Array, controller: WritableStreamDefaultController) {
+    controller.signal.throwIfAborted();
+    if (this.serialPort.fd === undefined) {
+      controller.error("writable closed");
+      return;
     }
-  }
-
-  async write(data: Uint8Array) {
+    // TODO: ensure everything is written
     const wlen = await library.symbols.write(
-      this.fd,
+      this.serialPort.fd,
       Deno.UnsafePointer.of(data),
       data.length,
     );
     if (wlen < 0) {
-      throw new Error(`Error while writing: ${await geterrnoString()}`);
+      controller.error(`Error while writing: ${await geterrnoString()}`);
     }
     if (wlen !== data.length) { // could this happen!?
-      throw new Error("Couldn't write data");
+      controller.error("Couldn't write data");
     }
-  }
-
-  async write_string(str: string) {
-    const data = new TextEncoder().encode(str);
-    return await this.write(data);
   }
 
   async close() {
-    const ret = await library.symbols.close(this.fd);
-    if (ret < 0) {
-      throw new Error(`Error while closing: ${await geterrnoString()}`);
-    }
+    await this.serialPort.close();
+  }
+
+  async abort() {
+    await this.serialPort.close();
   }
 }
 
@@ -215,87 +274,193 @@ function is_platform_little_endian(): boolean {
   return new Int16Array(buffer)[0] === 256;
 }
 
-export async function open(file: string, options: SerialOptions) {
-  const buffer = new TextEncoder().encode(file);
-  const fd = await library.symbols.open(
-    Deno.UnsafePointer.of(buffer),
-    O_RDWR | O_NOCTTY | O_SYNC,
-  );
+export class SerialPort implements AsyncDisposable {
+  #fd: number | undefined;
+  options: SerialOptions | undefined;
+  #readable: ReadableStream<Uint8Array> | null = null;
+  #writable: WritableStream<Uint8Array> | null = null;
 
-  if (fd < 0) {
-    throw new Error(`Couldn't open '${file}': ${await geterrnoString()}`);
+  get fd() {
+    return this.#fd;
   }
 
-  // termios tty{};
-  const tty = new ArrayBuffer(100);
-  const ttyPtr = Deno.UnsafePointer.of(tty);
-
-  if (await library.symbols.tcgetattr(fd, ttyPtr) != 0) {
-    throw new Error(`tcgetattr: ${await geterrnoString()}`);
+  get readable() {
+    return this.#readable;
   }
 
-  await library.symbols.cfsetspeed(ttyPtr, options.baudrate);
-
-  const dataView = new DataView(tty);
-  const littleEndian = is_platform_little_endian();
-  dataView.setUint32(0, 0, littleEndian); // c_iflag
-  dataView.setUint32(4, 0, littleEndian); // c_oflag
-
-  let cflag = dataView.getUint32(8, littleEndian);
-  cflag &= ~PARENB; // Clear parity bit, disabling parity (most common)
-  cflag &= ~CSTOPB; // Clear stop field, only one stop bit used in communication (most common)
-  cflag &= ~CSIZE; // Clear all bits that set the data size
-  cflag |= CS8; // 8 bits per byte (most common)
-  cflag &= ~CRTSCTS; // Disable RTS/CTS hardware flow control (most common)
-  cflag |= CREAD | CLOCAL; // Turn on READ & ignore ctrl lines (CLOCAL = 1)
-  dataView.setUint32(8, cflag, littleEndian); // c_cflag
-
-  dataView.setUint32(12, 0, littleEndian); // c_lflag
-
-  // Wait for up to 1s (10 deciseconds), returning as soon as any data is received.
-  dataView.setUint8(17 + VTIME, options.timeout_in_deciseconds);
-  dataView.setUint8(17 + VMIN, options.minimum_number_of_chars_read);
-
-  if (await library.symbols.tcsetattr(fd, TCSANOW, ttyPtr) != 0) {
-    throw new Error(`tcsetattr: ${await geterrnoString()}`);
+  get writable() {
+    return this.#writable;
   }
 
-  return new SerialPort(fd, options);
+  constructor(readonly filename: string) {}
+
+  async [Symbol.asyncDispose]() {
+    await this.close();
+  }
+
+  async open(options: SerialOptions) {
+    if (this.#fd !== undefined) {
+      throw new Error("already open");
+    }
+
+    const baudRate = numberBaudrateToBaudrateValue(options.baudRate);
+    if (
+      options.dataBits !== undefined && options.dataBits !== 7 &&
+      options.dataBits !== 8
+    ) {
+      throw new Error("dataBits can only be undefined | 7 | 8");
+    }
+
+    if (options.stopBits !== undefined) {
+      throw new Error("setting stopBits is not implemented");
+    }
+
+    if (options.parity !== undefined) {
+      throw new Error("setting parity is not implemented");
+    }
+
+    if (
+      options.bufferSize !== undefined && options.bufferSize <= 0
+    ) {
+      throw new Error("bufferSize needs to be >0");
+    }
+
+    if (options.flowControl !== undefined) {
+      throw new Error("setting flowControl is not implemented");
+    }
+
+    this.options = options;
+    const buffer = new TextEncoder().encode(this.filename);
+    const fd = await library.symbols.open(
+      Deno.UnsafePointer.of(buffer),
+      O_RDWR | O_NOCTTY | O_SYNC,
+    );
+
+    if (fd < 0) {
+      throw new Error(
+        `Couldn't open '${this.filename}': ${await geterrnoString()}`,
+      );
+    }
+
+    // termios tty{};
+    const tty = new ArrayBuffer(100);
+    const ttyPtr = Deno.UnsafePointer.of(tty);
+
+    if (await library.symbols.tcgetattr(fd, ttyPtr) != 0) {
+      SerialPort.internalClose(fd);
+      throw new Error(`tcgetattr: ${await geterrnoString()}`);
+    }
+
+    await library.symbols.cfsetspeed(ttyPtr, baudRate);
+
+    const dataView = new DataView(tty);
+    const littleEndian = is_platform_little_endian();
+    dataView.setUint32(0, 0, littleEndian); // c_iflag
+    dataView.setUint32(4, 0, littleEndian); // c_oflag
+
+    let cflag = dataView.getUint32(8, littleEndian);
+    cflag &= ~PARENB; // Clear parity bit, disabling parity (most common)
+    cflag &= ~CSTOPB; // Clear stop field, only one stop bit used in communication (most common)
+    cflag &= ~CSIZE; // Clear all bits that set the data size
+    if (options.dataBits === 7) {
+      cflag |= CS7;
+    } else {
+      cflag |= CS8; // 8 bits per byte (most common)
+    }
+    cflag &= ~CRTSCTS; // Disable RTS/CTS hardware flow control (most common)
+    cflag |= CREAD | CLOCAL; // Turn on READ & ignore ctrl lines (CLOCAL = 1)
+    dataView.setUint32(8, cflag, littleEndian); // c_cflag
+
+    dataView.setUint32(12, 0, littleEndian); // c_lflag
+
+    // Wait for up to 1s (10 deciseconds), returning as soon as any data is received.
+    dataView.setUint8(17 + VTIME, options.timeoutInDeciseconds ?? 10);
+    dataView.setUint8(17 + VMIN, options.minimumNumberOfCharsRead ?? 0);
+
+    if (await library.symbols.tcsetattr(fd, TCSANOW, ttyPtr) != 0) {
+      SerialPort.internalClose(fd);
+      throw new Error(`tcsetattr: ${await geterrnoString()}`);
+    }
+
+    this.#fd = fd;
+    this.#readable = new ReadableStream<Uint8Array>(
+      new SerialSource(this),
+    );
+    this.#writable = new WritableStream<Uint8Array>(new SerialSink(this));
+  }
+
+  async close() {
+    const fd = this.#fd;
+    this.#fd = undefined;
+    this.#writable = null;
+    this.#readable = null;
+    await SerialPort.internalClose(fd);
+  }
+
+  static async internalClose(fd: number | undefined) {
+    if (fd === undefined) {
+      return;
+    }
+    const ret = await library.symbols.close(fd);
+    if (ret < 0) {
+      throw new Error(`Error while closing: ${await geterrnoString()}`);
+    }
+  }
 }
 
-function sleep(milliseconds: number) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
+// https://wicg.github.io/serial/#readable-attribute
+export class LineBreakTransformer {
+  #container = "";
 
-async function sendStuff(serial_port: SerialPort) {
-  while (true) {
-    await serial_port.write_string("Test message\n");
-    await sleep(2000);
+  constructor() {}
+
+  transform(chunk: string, controller: TransformStreamDefaultController) {
+    this.#container += chunk;
+    const lines = this.#container.split("\n");
+    this.#container = lines.pop() ?? "";
+    lines.forEach((line: string) => controller.enqueue(line));
+  }
+
+  flush(controller: TransformStreamDefaultController) {
+    controller.enqueue(this.#container);
   }
 }
 
-async function print(serial_port: SerialPort) {
-  for await (const l of serial_port.read_line()) {
-    console.log(`Data: ${l}`);
-  }
-}
-
-// Learn more at https://deno.land/manual/examples/module_metadata#concepts
 if (import.meta.main) {
-  const serial_port = await open("/dev/ttyUSB0", {
-    baudrate: Baudrate.B115200,
-    minimum_number_of_chars_read: 0,
-    timeout_in_deciseconds: 10,
-  });
+  const sleep = async (milliseconds: number) => {
+    await (new Promise((resolve) => setTimeout(resolve, milliseconds)));
+    return;
+  };
 
-  await Promise.race([sendStuff(serial_port), print(serial_port)]);
-  // while (true) {
-  //   const read = await serial_port.readString();
-  //   console.log(`Data: ${read}`);
-  //   if (read.length == 0) {
-  //     await serial_port.writeUTF8("Hallo");
-  //   }
-  // }
+  await using port = new SerialPort("/dev/ttyACM0");
 
-  //serial_port.close();
+  await port.open({ baudRate: 115200 });
+
+  const lineReader = port.readable!
+    .pipeThrough(new TextDecoderStream())
+    .pipeThrough(new TransformStream(new LineBreakTransformer()));
+
+  // write stuff every 200msec
+  (async () => {
+    const encoder = new TextEncoder();
+    const writable = port.writable!.getWriter();
+    try {
+      for (let i = 0;; i++) {
+        await writable.write(encoder.encode(`Test message ${i}\n`));
+        await sleep(200);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  })();
+
+  (async () => {
+    for await (const line of lineReader) {
+      console.log(line);
+    }
+  })();
+
+  // exit after 5 seconds
+  await sleep(5_000);
+  //port.close(); // automatically done by "await using"
 }
