@@ -221,14 +221,14 @@ export class SerialSource {
     const len = await library.symbols.read(
       this.serialPort.fd,
       Deno.UnsafePointer.of(buffer),
-      buffer.length,
+      BigInt(buffer.length),
     );
     if (len < 0) {
       controller.error(
         `Error while reading: ${await getNonBlockingErrnoString()}`,
       );
     }
-    controller.enqueue(buffer.subarray(0, len as number));
+    controller.enqueue(buffer.subarray(0, Number(len)));
   }
 
   cancel() {
@@ -249,12 +249,12 @@ export class SerialSink {
     const wlen = await library.symbols.write(
       this.serialPort.fd,
       Deno.UnsafePointer.of(data),
-      data.length,
+      BigInt(data.length),
     );
     if (wlen < 0) {
       controller.error(`Error while writing: ${await geterrnoString()}`);
     }
-    if (wlen !== data.length) { // could this happen!?
+    if (Number(wlen) !== data.length) { // could this happen!?
       controller.error("Couldn't write data");
     }
   }
